@@ -31,7 +31,27 @@ hwpx-skill/
 
 ## 설치
 
-### 1) Python 의존성
+### A) Claude Code 플러그인으로 설치 (권장)
+
+이 저장소는 Claude Code 마켓플레이스 매니페스트(`.claude-plugin/marketplace.json`)
+를 포함하므로, 수동 복사 없이 Claude Code 슬래시 명령으로 바로 설치할 수 있다.
+
+```text
+/plugin marketplace add ssabro/hwpx-skill
+/plugin install hwpx-skill@ssabro-skills
+```
+
+업데이트가 필요하면:
+
+```text
+/plugin marketplace update ssabro-skills
+```
+
+설치 후 Python 의존성(`python-hwpx`)은 아래 "B) 수동 설치" 의 1 단계를 참고한다.
+
+### B) 수동 설치
+
+#### 1) Python 의존성
 
 ```bash
 pip install python-hwpx
@@ -39,7 +59,7 @@ pip install python-hwpx
 pip install python-hwpx --break-system-packages
 ```
 
-### 2) 스킬을 Claude Code 로 연결
+#### 2) 스킬을 Claude Code 로 연결
 
 ```bash
 # macOS / Linux
@@ -49,7 +69,7 @@ cp -r . ~/.claude/skills/hwpx
 robocopy . "$env:USERPROFILE\.claude\skills\hwpx" /E
 ```
 
-### 3) 스켈레톤 1 회 생성
+#### 3) 스켈레톤 1 회 생성
 
 ```bash
 python scripts/build_report_skeleton.py
