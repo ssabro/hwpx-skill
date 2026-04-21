@@ -1,83 +1,126 @@
 # hwpx-skill
 
-[Canine89/gonggong_hwpxskills](https://github.com/Canine89/gonggong_hwpxskills)를 기반으로 **크로스 플랫폼 호환성, 문서 일관성, 보안 강화** 작업을 수행한 포크입니다.
+Claude Code 용 한글(HWPX) 문서 생성·편집 스킬.
+`python-hwpx` 와 이 프로젝트의 `hwpx_toolkit` 모듈을 함께 써서
+한글 보고서·공문서를 생성하고, 스켈레톤 위에 플레이스홀더 치환을
+수행하며, 편집된 ZIP 을 원자적으로 커밋한다. 한컴 Viewer 가 요구하는
+네임스페이스 prefix 정규화까지 포함한다.
 
-## 개요
-
-한글(한컴오피스)의 HWPX 문서를 Claude Code 스킬로 생성, 읽기, 편집, 템플릿 치환하는 도구입니다. `python-hwpx` 라이브러리와 ZIP-level XML 치환 방식을 사용합니다.
-
-## 프로젝트 구조
+## 프로젝트 구성
 
 ```
 hwpx-skill/
-├── SKILL.md                         # 스킬 본문 (Claude Code가 읽는 메인 문서)
-├── assets/
-│   └── report-template.hwpx         # 보고서 기본 양식 템플릿
-├── scripts/
-│   └── fix_namespaces.py            # HWPX 네임스페이스 후처리 유틸리티
-├── references/
-│   ├── report-style.md              # 보고서 양식 상세 가이드
-│   ├── official-doc-style.md        # 공문서(기안문) 양식 가이드
-│   └── xml-internals.md             # HWPX 내부 XML 구조 참조
-└── evals/
-    └── evals.json                   # 스킬 평가 테스트 케이스
+├─ SKILL.md                               # Claude 가 로드하는 스킬 본문
+├─ README.md                              # 이 파일
+├─ LICENSE                                # MIT
+├─ scripts/
+│  ├─ hwpx_toolkit.py                     # 편집 코어 (HwpxPackage)
+│  ├─ hwpx_ns_repair.py                   # 네임스페이스 정규화 CLI
+│  └─ build_report_skeleton.py            # 기본 보고서 스켈레톤 생성기
+├─ assets/                                # (비어 있음 — 빌드 시 채움)
+├─ references/
+│  ├─ hwpx-format-notes.md                # 내부 포맷/네임스페이스/HWPUNIT 메모
+│  ├─ report-writing-guide.md             # 내부 보고용 보고서 규격
+│  └─ official-letter-guide.md            # 공문(기안문) 규격
+└─ evals/
+   └─ eval-cases.json                     # 평가 케이스
 ```
 
-## 원본 대비 변경 사항
-
-### 1. 크로스 플랫폼 호환성
-
-원본은 macOS/Linux(특히 Claude.ai Projects 환경)에서만 테스트되었습니다. Windows, Linux, macOS 모두에서 동작하도록 수정했습니다.
-
-| 항목 | 원본 | 수정 후 |
-|------|------|---------|
-| 파일 경로 | `/mnt/skills/user/hwpx/`, `/home/claude/` 등 하드코딩 | `os.path.join()` + 상대 경로 |
-| Python 실행 | `subprocess.run(["python", ...])` | `subprocess.run([sys.executable, ...])` |
-| pip 설치 | `pip install python-hwpx --break-system-packages` | venv 권장 안내 추가, PEP 668 환경 별도 안내 |
-
-**수정 파일**: `SKILL.md`
-
-### 2. 문서 일관성 수정
-
-파일 간 모순되는 안내를 통일했습니다.
-
-| 항목 | 원본 | 수정 후 |
-|------|------|---------|
-| `fix_namespaces.py` docstring | `exec(open(...).read())` 방식 안내 | `from fix_namespaces import` 방식으로 변경 |
-| `report-style.md` 예제 코드 | 존재하지 않는 `hwpx_replace` 모듈 import, `HwpxDocument.open()` 사용 | ZIP-level 치환(`zip_replace`)으로 통일 |
-| `SKILL.md` 주의사항 | `exec()` 사용 금지만 안내 | 직접 import 방식과 `sys.executable` 방식 모두 안내 |
-
-**수정 파일**: `fix_namespaces.py`, `references/report-style.md`, `SKILL.md`
-
-### 3. 보안 강화
-
-ZIP 파일을 직접 다루는 코드에 보안 방어를 추가했습니다.
-
-| 취약점 | 심각도 | 대응 |
-|--------|--------|------|
-| 예측 가능한 임시파일 경로 (TOCTOU 경쟁조건) | HIGH | `tempfile.mkstemp()` 사용 + 실패 시 cleanup |
-| XML 인젝션 (치환 값에 `<>&` 미이스케이핑) | MEDIUM | `xml.sax.saxutils.escape()` 기본 적용 (`escape_xml=True`) |
-| ZIP bomb (메모리 소진 공격) | MEDIUM | ZIP 엔트리당 50MB 크기 제한 검증 |
-| Zip Slip (경로 순회) | LOW | ZIP 엔트리 파일명의 `..`, 절대 경로 검증 |
-| 비원자적 파일 교체 | LOW | `os.remove()` + `os.rename()` → `os.replace()` 원자적 교체 |
-
-**수정 파일**: `scripts/fix_namespaces.py`, `SKILL.md`
+바이너리 템플릿은 저장소에 커밋하지 않는다. 필요할 때 아래의
+`scripts/build_report_skeleton.py` 로 그때그때 생성한다.
 
 ## 설치
 
+### 1) Python 의존성
+
 ```bash
-# 1. python-hwpx 설치
 pip install python-hwpx
-
-# 2. 이 저장소를 Claude Code 스킬 디렉토리에 복사
-# macOS/Linux
-cp -r hwpx-skill ~/.claude/skills/hwpxskill
-
-# Windows
-xcopy /E /I hwpx-skill %USERPROFILE%\.claude\skills\hwpxskill
+# PEP 668 시스템 파이썬을 강제로 쓸 때만
+pip install python-hwpx --break-system-packages
 ```
 
-## 원본 저장소
+### 2) 스킬을 Claude Code 로 연결
 
-- **원본**: [Canine89/gonggong_hwpxskills](https://github.com/Canine89/gonggong_hwpxskills)
-- **라이선스**: 원본 저장소의 라이선스를 따릅니다.
+```bash
+# macOS / Linux
+cp -r . ~/.claude/skills/hwpx
+
+# Windows (PowerShell)
+robocopy . "$env:USERPROFILE\.claude\skills\hwpx" /E
+```
+
+### 3) 스켈레톤 1 회 생성
+
+```bash
+python scripts/build_report_skeleton.py
+# 결과: assets/report-skeleton.hwpx
+```
+
+스켈레톤은 `{{ORG_NAME}}`, `{{REPORT_TITLE}}`, `{{REPORT_DATE}}` …
+와 같은 마커가 박힌 최소 구조의 HWPX 문서이다. 이 프로젝트 전용 마커
+네이밍이며 다른 프로젝트의 플레이스홀더와 충돌하지 않는다.
+
+## 빠른 사용 예
+
+### 보고서 — 스켈레톤 기반
+
+```python
+import shutil
+from pathlib import Path
+from hwpx_toolkit import HwpxPackage
+
+shutil.copy("assets/report-skeleton.hwpx", "report.hwpx")
+
+with HwpxPackage.open("report.hwpx") as pkg:
+    pkg.replace_all({
+        "{{ORG_NAME}}":     "AI 정책국",
+        "{{REPORT_TITLE}}": "2026 하반기 운영 계획",
+        "{{REPORT_DATE}}":  "2026. 4. 21.",
+        "{{DOC_SUBTITLE}}": "정책 방향 및 실행 계획",
+    })
+    pkg.replace_ordered("{{HEADING_L1}}", ["추진 배경", "현황", "개선"])
+    pkg.normalize_namespaces()
+    pkg.commit()
+```
+
+### 공문 — 빈 문서에서 새로 작성
+
+```python
+from hwpx.document import HwpxDocument
+from hwpx_toolkit import normalize_namespaces_in_place
+
+doc = HwpxDocument.new()
+doc.add_paragraph("1. 관련: 교육정책과-1234(2026. 2. 1.)")
+doc.add_paragraph("2. 2026 년도 정보화 교육을 다음과 같이 안내하오니 …")
+doc.add_paragraph("  가. 일시: 2026. 3. 10.(화) 14:00 ∼ 16:00")
+doc.add_paragraph("붙임  일정표 1부.  끝.")
+
+doc.save("letter.hwpx")
+normalize_namespaces_in_place("letter.hwpx")
+```
+
+## 트리거 예시
+
+- "한글로 보고서 작성해줘"
+- "이 hwpx 양식으로 채워줘"
+- "공문/기안문 기안해줘"
+- ".hwpx 파일 만들어줘"
+
+상세 사용법은 `SKILL.md` 를 참고한다.
+
+## 설계 특징
+
+- **원자적 커밋** — 임시 파일에 쓴 뒤 `os.replace` 로 교체. 중단되어도
+  원본이 손상되지 않는다.
+- **XML 이스케이프 기본 ON** — 외부 입력을 치환 값으로 받아도 XML 인젝션
+  위험이 없다.
+- **ZIP bomb 방어** — 단일 엔트리 50 MB 상한.
+- **Zip Slip 방어** — 로드 시 `..` 포함 엔트리 거부.
+- **네임스페이스 정규화 일원화** — 라이브러리로서 `HwpxPackage` 안에도
+  포함되고, 독립 CLI (`scripts/hwpx_ns_repair.py`) 로도 제공된다.
+- **크로스 플랫폼** — `pathlib.Path`, `sys.executable` 사용. Windows /
+  macOS / Linux 동일 코드로 동작.
+
+## 라이선스
+
+MIT. `LICENSE` 참고.

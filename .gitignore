@@ -1,1 +1,4 @@
 %programdata%/
+__pycache__/
+*.pyc
+dist/
