@@ -18,13 +18,36 @@ description: "한글(한컴오피스) HWPX 문서를 생성·읽기·편집·양
 
 ## 1. 환경
 
-```bash
-# 권장: 가상환경(venv/conda) 안에서
-pip install python-hwpx
+### 1-0. 자가 점검 — 스킬 호출 직전 (필수)
 
-# PEP 668 시스템 파이썬에 강제로 설치해야 하는 경우만
-pip install python-hwpx --break-system-packages
+HWPX 관련 요청을 받으면 **실제 편집 코드를 실행하기 직전에** 아래 두
+가지를 이 순서대로 점검하고, 빠져 있는 것만 채운다. 둘 다 멱등이므로
+매 사용 전 검사해도 무해하다. 사용자가 수동 설치를 이미 했다면
+대부분 no-op 으로 끝난다.
+
+```bash
+# (1) python-hwpx 가 import 가능한가
+#     실패할 때만 pip 로 설치. PEP 668 면 --break-system-packages 재시도.
+python -c "import hwpx" 2>/dev/null \
+    || pip install python-hwpx \
+    || pip install python-hwpx --break-system-packages
+
+# (2) 빌트인 스켈레톤이 존재하는가 (빌트인 경로로 보고서를 만들 때만)
+#     SKILL_DIR = 이 SKILL.md 가 있는 디렉터리.
+test -f "$SKILL_DIR/assets/report-skeleton.hwpx" \
+    || python "$SKILL_DIR/scripts/build_report_skeleton.py"
 ```
+
+PowerShell 환경에서도 흐름은 동일하다 — `python -c "import hwpx"` 의
+exit code 로 분기하고 `Test-Path` 로 스켈레톤을 점검한다. `python` 이
+`python3` 로만 잡히는 macOS·Linux 환경에서는 아래 규칙에 따라
+`sys.executable` 또는 `python3` 로 대체한다.
+
+사용자 업로드 양식만 쓸 예정이면 (2) 는 건너뛴다 (Section 2 참고).
+사용자 환경이 가상환경 없이 PEP 668 로 보호된 경우 (1) 의 세 번째
+분기로 `--break-system-packages` 가 자동으로 시도된다.
+
+### 1-1. 파이썬 실행 관례
 
 파이썬 인터프리터를 호출할 때는 항상 `sys.executable` 을 쓴다 (macOS·Linux
 에서 `python` 이 `python3` 일 수 있음).
