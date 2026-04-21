@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 dist/*.plugin
 dist/*.zip
+
+# 바이너리 산출물 — 저장소에 커밋하지 않음
+assets/*.hwpx
+samples/

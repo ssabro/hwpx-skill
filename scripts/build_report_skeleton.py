@@ -101,7 +101,7 @@ def build(output_path: Path) -> Path:
     _render_body(doc)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
+    doc.save_to_path(str(output_path))
     normalize_namespaces_in_place(output_path)
     return output_path
 
