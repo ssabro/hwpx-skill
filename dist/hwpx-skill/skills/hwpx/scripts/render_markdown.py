@@ -25,6 +25,7 @@ OUTPUT 을 생략하면 `<INPUT stem>.hwpx` 를 CWD 에 쓴다. INPUT 이
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -44,6 +45,24 @@ except ImportError:  # pragma: no cover
         "`pip install markdown-it-py` 로 먼저 설치하세요.\n"
     )
     raise SystemExit(1)
+
+# 선택적 플러그인 — 각 기능이 없을 때는 해당 문법은 평문 통과.
+try:
+    from mdit_py_plugins.front_matter import front_matter_plugin
+except ImportError:
+    front_matter_plugin = None
+try:
+    from mdit_py_plugins.footnote import footnote_plugin
+except ImportError:
+    footnote_plugin = None
+try:
+    from mdit_py_plugins.deflist import deflist_plugin
+except ImportError:
+    deflist_plugin = None
+try:
+    from mdit_py_plugins.dollarmath import dollarmath_plugin
+except ImportError:
+    dollarmath_plugin = None
 
 from lxml import etree as _LXML_ET  # python-hwpx 내부와 호환되는 요소 빌더
 
@@ -199,6 +218,44 @@ def _ensure_link_charpr(doc: HwpxDocument) -> str:
     return new_el.get("id")
 
 
+def _ensure_strike_charpr(doc: HwpxDocument) -> str:
+    """취소선용 charPr id 반환. 기본 strikeout 의 shape 를 SOLID 로 바꾼다."""
+    header = doc.headers[0]
+
+    def predicate(el) -> bool:
+        so = el.find(f"{_HH}strikeout")
+        return so is not None and (so.get("shape") or "").upper() == "SOLID"
+
+    def modifier(el) -> None:
+        for so in list(el.findall(f"{_HH}strikeout")):
+            el.remove(so)
+        _LXML_ET.SubElement(
+            el, f"{_HH}strikeout", {"shape": "SOLID", "color": "#555555"}
+        )
+
+    new_el = header.ensure_char_property(
+        predicate=predicate, modifier=modifier, base_char_pr_id="0"
+    )
+    return new_el.get("id")
+
+
+def _ensure_highlight_charpr(doc: HwpxDocument) -> str:
+    """노란 음영(하이라이트) charPr id 반환."""
+    header = doc.headers[0]
+    shade = "#FFFF66"
+
+    def predicate(el) -> bool:
+        return el.get("shadeColor") == shade
+
+    def modifier(el) -> None:
+        el.set("shadeColor", shade)
+
+    new_el = header.ensure_char_property(
+        predicate=predicate, modifier=modifier, base_char_pr_id="0"
+    )
+    return new_el.get("id")
+
+
 def _ensure_code_charpr(doc: HwpxDocument, *, mono_font_id_latin: int | None) -> str:
     """모노스페이스 + 연한 음영인 코드용 charPr id 반환."""
     header = doc.headers[0]
@@ -225,6 +282,42 @@ def _ensure_code_charpr(doc: HwpxDocument, *, mono_font_id_latin: int | None) ->
         base_char_pr_id="0",
     )
     return new_el.get("id")
+
+
+# 기본 본문 폰트 — Windows/Mac 모두 설치율이 높은 선택.
+# - HANGUL: "맑은 고딕" (Windows 기본), macOS 에는 "Apple SD Gothic Neo" 로 대체됨
+# - LATIN: "Segoe UI" (Windows 기본 UI 폰트)
+# 환경변수 HWPX_RENDER_FONT / HWPX_RENDER_FONT_LATIN 로 덮어쓸 수 있다.
+import os as _os  # noqa: E402
+
+DEFAULT_HANGUL_FONT = _os.environ.get("HWPX_RENDER_FONT", "맑은 고딕")
+DEFAULT_LATIN_FONT = _os.environ.get("HWPX_RENDER_FONT_LATIN", "Segoe UI")
+
+
+def _apply_default_fonts(doc: HwpxDocument) -> None:
+    """기본 본문 폰트를 사용자 친화적인 것으로 교체.
+
+    HwpxDocument.new() 는 '함초롬돋움' / '함초롬바탕' 을 쓰는데 이 폰트는
+    한컴오피스 전용이라 Word·LibreOffice 등 외부 뷰어에서 흐릿하거나 대체
+    폰트로 렌더된다. Windows 에 기본 설치된 '맑은 고딕' 등으로 바꾸면 어느
+    환경에서도 깔끔하게 표시된다.
+    """
+    hangul_id = _add_font(doc, DEFAULT_HANGUL_FONT, "HANGUL")
+    latin_id = _add_font(doc, DEFAULT_LATIN_FONT, "LATIN")
+    # 모든 charPr 의 fontRef 가 새 폰트를 가리키도록 id=0 을 덮어쓴다.
+    header = doc.headers[0]
+    if hangul_id is not None or latin_id is not None:
+        for cp in header.element.iter(f"{_HH}charPr"):
+            fr = cp.find(f"{_HH}fontRef")
+            if fr is None:
+                continue
+            # 본문(기본)용 fontRef 만 바꿈 — 이미 다른 id 를 참조(예: Consolas)
+            # 하는 곳은 건드리지 않는다.
+            if fr.get("hangul") == "0" and hangul_id is not None:
+                fr.set("hangul", str(hangul_id))
+            if fr.get("latin") == "0" and latin_id is not None:
+                fr.set("latin", str(latin_id))
+        header.mark_dirty()
 
 
 # 제목 레벨별 글자 크기(1/100 pt). 워드 기본 헤딩 사이즈와 유사.
@@ -346,6 +439,100 @@ def _bullet_for_depth(depth: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 전처리 (이모지, GFM 알림, Mermaid 라벨)                                     #
+# --------------------------------------------------------------------------- #
+
+# 자주 쓰이는 이모지 단축코드 → 유니코드 매핑 (전역 플러그인 없이 간이 지원).
+EMOJI_MAP = {
+    ":smile:": "😀", ":smiley:": "😃", ":laughing:": "😂",
+    ":heart:": "❤", ":thumbsup:": "👍", ":thumbs_up:": "👍",
+    ":thumbsdown:": "👎", ":fire:": "🔥", ":star:": "⭐",
+    ":check:": "✓", ":x:": "✗", ":warning:": "⚠",
+    ":bulb:": "💡", ":book:": "📖", ":pencil:": "✏",
+    ":rocket:": "🚀", ":tada:": "🎉", ":+1:": "👍", ":-1:": "👎",
+    ":eyes:": "👀", ":sparkles:": "✨", ":bug:": "🐛",
+}
+
+# GFM 경고 블록 매핑 — > [!TYPE] 를 접두어 라벨로
+ALERT_LABELS = {
+    "NOTE":      "📝 참고",
+    "TIP":       "💡 팁",
+    "IMPORTANT": "❗ 중요",
+    "WARNING":   "⚠ 경고",
+    "CAUTION":   "🚨 주의",
+}
+
+_ALERT_RE = re.compile(r"^\[\!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$")
+
+
+def _preprocess(text: str) -> str:
+    """MarkdownIt 에 넘기기 전 텍스트 치환.
+
+    - 이모지 단축코드(:name:) → 유니코드 문자
+    - ==하이라이트== → **굵게** 로 치환 (전용 스타일이 없어서 bold 로 폴백)
+    - 숫자 전용 첨자: H~2~O → H₂O, x^2^ → x²
+      (문자/식 포함 첨자는 유니코드 대응이 없어 원문 유지)
+    - <br> HTML 태그 → 줄바꿈 마커
+    """
+    # 이모지
+    for code, ch in EMOJI_MAP.items():
+        text = text.replace(code, ch)
+    # ==하이라이트== → 일단 bold 로 (markdown-it 에 ==rule 없음)
+    text = re.sub(r"==([^=\n]+)==", r"**\1**", text)
+
+    # 숫자 전용 subscript / superscript
+    sub_map = str.maketrans(
+        "0123456789+-=()abeilmnoprstuvx",
+        "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐᵦₑᵢₗₘₙₒₚᵣₛₜᵤᵥₓ",
+    )
+    sup_map = str.maketrans(
+        "0123456789+-=()abcdefghijklmnoprstuvwxyz",
+        "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ",
+    )
+    SUB_ALLOWED = set("0123456789+-=()abeilmnoprstuvx")
+    SUP_ALLOWED = set("0123456789+-=()abcdefghijklmnoprstuvwxyz")
+
+    def sub_repl(m):
+        content = m.group(1)
+        if all(c in SUB_ALLOWED for c in content):
+            return content.translate(sub_map)
+        return m.group(0)
+
+    def sup_repl(m):
+        content = m.group(1)
+        if all(c in SUP_ALLOWED for c in content):
+            return content.translate(sup_map)
+        return m.group(0)
+
+    # subscript ~x~  (strikethrough ~~ 와 충돌 방지: 앞뒤가 ~ 가 아닐 때만)
+    text = re.sub(r"(?<!~)~([^\s~]+)~(?!~)", sub_repl, text)
+    # superscript ^x^
+    text = re.sub(r"\^([^\s\^]+)\^", sup_repl, text)
+
+    # <br> 태그 → 하드브레이크 마커
+    text = re.sub(r"<br\s*/?>", "  \n", text, flags=re.IGNORECASE)
+
+    return text
+
+
+def _detect_alert(blockquote_inline_tokens) -> tuple[str, str] | None:
+    """blockquote 의 첫 inline 토큰이 GFM 알림 마커(`[!TYPE]`) 면
+    (label, first_line_rest) 반환. 아니면 None."""
+    if not blockquote_inline_tokens:
+        return None
+    # 첫 text 토큰
+    for tok in blockquote_inline_tokens:
+        if tok.type != "text":
+            continue
+        m = _ALERT_RE.match((tok.content or "").strip())
+        if m:
+            kind, rest = m.group(1), m.group(2)
+            return ALERT_LABELS.get(kind, kind), rest
+        break
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # 렌더러                                                                      #
 # --------------------------------------------------------------------------- #
 
@@ -370,6 +557,10 @@ class MarkdownHwpxRenderer:
         self.cp_link = _ensure_link_charpr(doc)
         mono_latin = _add_font(doc, "Consolas", "LATIN")
         self.cp_code = _ensure_code_charpr(doc, mono_font_id_latin=mono_latin)
+        # 취소선 / 하이라이트 (현재는 하이라이트는 전처리로 **bold** 치환하므로
+        # cp_highlight 는 미사용 — 추후 mdit ==rule 커스텀 추가 시 연결)
+        self.cp_strike = _ensure_strike_charpr(doc)
+        self.cp_highlight = _ensure_highlight_charpr(doc)
         # T4 — 헤딩 전용 charPr (레벨별 큰 글자 + 굵게)
         self.heading_cp = {
             lvl: _ensure_heading_charpr(doc, lvl) for lvl in range(1, 7)
@@ -384,13 +575,28 @@ class MarkdownHwpxRenderer:
         # 리스트 상태: 스택 기반 중첩 추적
         # 각 항목: ("bullet", depth) / ("ordered", depth, next_number) / ("blockquote", depth)
         self.list_stack: list = []
+        # GFM alert 검출용: blockquote 바로 안의 첫 단락 여부
+        self._bq_at_start: bool = False
         # 이미지 처리 추적 (참고용)
         self.images_embedded: list[dict] = []
 
     # ---- 공개 진입점 ---- #
 
     def render(self, markdown_text: str) -> None:
-        md = MarkdownIt("commonmark").enable("table")
+        # 이모지 단축코드·==하이라이트== 전처리
+        markdown_text = _preprocess(markdown_text)
+
+        md = MarkdownIt("commonmark", {"linkify": True, "html": False})
+        md.enable("table").enable("strikethrough").enable("linkify")
+        if front_matter_plugin is not None:
+            md.use(front_matter_plugin)
+        if footnote_plugin is not None:
+            md.use(footnote_plugin)
+        if deflist_plugin is not None:
+            md.use(deflist_plugin)
+        if dollarmath_plugin is not None:
+            md.use(dollarmath_plugin, allow_space=True, allow_digits=True)
+
         tokens = md.parse(markdown_text)
         self._render_tokens(tokens)
 
@@ -439,8 +645,10 @@ class MarkdownHwpxRenderer:
         """markdown-it inline 토큰의 children 을 순회하며 run 을 추가."""
         bold = False
         italic = False
+        strike = False
         in_link = False
         link_href: str | None = None
+        link_is_auto = False  # linkify / autolink 여부
         for tok in children:
             t = tok.type
             if t == "strong_open":
@@ -451,23 +659,28 @@ class MarkdownHwpxRenderer:
                 italic = True
             elif t == "em_close":
                 italic = False
+            elif t == "s_open":
+                strike = True
+            elif t == "s_close":
+                strike = False
             elif t == "link_open":
                 in_link = True
                 link_href = tok.attrGet("href")
+                # linkify 자동 링크 또는 <URL> 자동 링크는 텍스트가 URL 이라
+                # URL 중복 부기를 생략.
+                link_is_auto = tok.markup in ("linkify", "autolink")
             elif t == "link_close":
-                # URL 도 괄호로 덧붙여 인쇄 매체에서도 찾아갈 수 있게 한다.
-                if link_href:
-                    para.add_run(
-                        f" ({link_href})",
-                        char_pr_id_ref=self.cp_regular,
-                    )
+                if link_href and not link_is_auto:
+                    para.add_run(f" ({link_href})", char_pr_id_ref=self.cp_regular)
                 in_link = False
                 link_href = None
+                link_is_auto = False
             elif t == "text":
                 if tok.content:
                     if in_link:
-                        # 링크 본문은 파란색 + 밑줄
                         para.add_run(tok.content, char_pr_id_ref=self.cp_link)
+                    elif strike:
+                        para.add_run(tok.content, char_pr_id_ref=self.cp_strike)
                     else:
                         para.add_run(
                             tok.content,
@@ -476,25 +689,26 @@ class MarkdownHwpxRenderer:
                             ),
                         )
             elif t == "code_inline":
-                # T3: 백틱 래핑 + 모노스페이스 + 음영
-                para.add_run(
-                    f"`{tok.content}`",
-                    char_pr_id_ref=self.cp_code,
-                )
+                para.add_run(f"`{tok.content}`", char_pr_id_ref=self.cp_code)
+            elif t == "math_inline":
+                # 수학식은 HWPX 에서 제대로 렌더 안 됨. 달러 기호로 보존.
+                para.add_run(f"${tok.content}$", char_pr_id_ref=self.cp_italic)
             elif t == "softbreak":
                 para.add_run(" ", char_pr_id_ref=self.cp_regular)
             elif t == "hardbreak":
-                para.add_run("  ", char_pr_id_ref=self.cp_regular)
+                # 하드 줄바꿈 — 이어지는 텍스트는 같은 단락에 있되 시각적 개행
+                # 표시를 위해 ↵ 문자와 공백을 삽입.
+                para.add_run(" ↵ ", char_pr_id_ref=self.cp_regular)
             elif t == "image":
-                # T3: 이미지는 BinData 에 등록하고 본문에는 플레이스홀더로
                 src = tok.attrGet("src") or ""
                 alt = tok.content or tok.attrGet("alt") or ""
                 info = self._try_embed_image(src, alt)
                 placeholder = info["placeholder"] if info else f"[🖼 {alt} ({src})]"
                 para.add_run(placeholder, char_pr_id_ref=self.cp_italic)
-            elif t == "s_open" or t == "s_close":
-                # 취소선은 T3 에서도 미지원 (XML 저수준 필요). 통과.
-                pass
+            elif t == "footnote_ref":
+                # footnote_ref 는 tok.meta["id"] 또는 label 을 가짐
+                label = (tok.meta or {}).get("label") or tok.content or "?"
+                para.add_run(f"[^{label}]", char_pr_id_ref=self.cp_link)
             else:
                 if hasattr(tok, "content") and tok.content:
                     para.add_run(
@@ -503,6 +717,11 @@ class MarkdownHwpxRenderer:
                             bold=bold, italic=italic
                         ),
                     )
+        # 링크 토큰이 닫힐 때 URL 부기 (link 가 사용자 작성 [text](url) 인 경우만)
+        # 위 루프에서 link_close 는 이제 부기를 안 함 — linkify 로 생성된 자동 링크는
+        # 본문 텍스트 자체가 URL 이라 중복 표시를 피하기 위함. 사용자 [text](url)
+        # 에는 URL 부기를 복원하려면 tok.markup 이 "" 인지 "linkify" 인지 확인해야
+        # 하는데 구현 단순화를 위해 생략. (URL 은 파란색 밑줄로 구분 유지됨.)
 
     def _try_embed_image(self, src: str, alt: str) -> dict | None:
         """이미지 파일이 로컬에 있으면 BinData 에 등록. 성공 시 플레이스홀더
@@ -630,8 +849,9 @@ class MarkdownHwpxRenderer:
                 inline = tokens[i + 1]
                 para = self._new_paragraph(style_id=self.body_style)
                 prefix = self._current_list_prefix()
-                # T3: 리스트 아이템의 첫 텍스트가 GFM 태스크 마커면 ☐/☑ 로 치환
                 children = list(inline.children or [])
+
+                # T3: 리스트 아이템의 첫 텍스트가 GFM 태스크 마커면 ☐/☑ 로 치환
                 if prefix and children and children[0].type == "text":
                     first = children[0]
                     content = first.content or ""
@@ -641,6 +861,20 @@ class MarkdownHwpxRenderer:
                     elif content.lower().startswith("[x] "):
                         prefix = prefix + "☑ "
                         children[0].content = content[4:]
+
+                # GFM Alert: blockquote 바로 안의 첫 단락이 [!TYPE] 이면 라벨로 치환
+                in_bq = bool(self.list_stack) and self.list_stack[-1][0] == "blockquote"
+                if in_bq and self._bq_at_start and children and children[0].type == "text":
+                    m = _ALERT_RE.match((children[0].content or "").strip())
+                    if m:
+                        kind, rest = m.group(1), m.group(2)
+                        label = ALERT_LABELS.get(kind, kind)
+                        # 기존 │  prefix 뒤에 라벨을 덧붙여 "│ 📝 참고: 내용" 꼴
+                        prefix = prefix + f"{label}: "
+                        children[0].content = rest
+                if in_bq:
+                    self._bq_at_start = False
+
                 if prefix:
                     para.add_run(prefix, char_pr_id_ref=self.cp_regular)
                 self._emit_inline_runs(para, children)
@@ -678,10 +912,12 @@ class MarkdownHwpxRenderer:
             if t == "fence" or t == "code_block":
                 lang = (tok.info or "").strip()
                 para = self._new_paragraph(style_id=self.body_style)
-                para.add_run(
-                    f"```{lang}" if lang else "```",
-                    char_pr_id_ref=self.cp_bold,
-                )
+                header_text = f"```{lang}" if lang else "```"
+                # Mermaid 다이어그램은 실제 이미지 변환이 이 스킬 범위 밖.
+                # 코드 블록으로 내용을 보존하고 라벨만 덧붙인다.
+                if lang.lower() == "mermaid":
+                    header_text = "```mermaid  [다이어그램: 본 스킬은 텍스트로만 보존]"
+                para.add_run(header_text, char_pr_id_ref=self.cp_bold)
                 for line in tok.content.splitlines() or [""]:
                     p = self._new_paragraph(style_id=self.body_style)
                     # T3: 모노스페이스 + 음영 (뷰어/폰트 환경에 따라 안 보일 수 있음)
@@ -690,6 +926,82 @@ class MarkdownHwpxRenderer:
                     p.add_run(f"▏ {line}", char_pr_id_ref=self.cp_code)
                 para_end = self._new_paragraph(style_id=self.body_style)
                 para_end.add_run("```", char_pr_id_ref=self.cp_bold)
+                i += 1
+                continue
+
+            if t == "front_matter":
+                # YAML frontmatter 는 스킵 (메타데이터).
+                i += 1
+                continue
+
+            if t == "math_block":
+                # $$ 블록 수학식 — 실제 수식 렌더는 미지원. 원문 보존.
+                para = self._new_paragraph(style_id=self.body_style)
+                para.add_run("$$", char_pr_id_ref=self.cp_bold)
+                for line in (tok.content or "").splitlines():
+                    p = self._new_paragraph(style_id=self.body_style)
+                    p.add_run(f"▏ {line}", char_pr_id_ref=self.cp_italic)
+                para_end = self._new_paragraph(style_id=self.body_style)
+                para_end.add_run("$$", char_pr_id_ref=self.cp_bold)
+                i += 1
+                continue
+
+            if t == "footnote_block_open":
+                # footnote 섹션 헤더
+                para = self._new_paragraph(style_id=self.body_style)
+                para.add_run("─ 각주 ─", char_pr_id_ref=self.cp_bold)
+                i += 1
+                continue
+
+            if t == "footnote_block_close":
+                i += 1
+                continue
+
+            if t == "footnote_open":
+                label = (tok.meta or {}).get("label") or "?"
+                para = self._new_paragraph(style_id=self.body_style)
+                para.add_run(f"[^{label}]  ", char_pr_id_ref=self.cp_bold)
+                # 뒤따르는 paragraph_open 에서 본문을 덧붙이지만, 위 para 에 이어
+                # 이어질 수 있도록 단락을 이미 만들어 뒀다. 간단화를 위해
+                # 이어지는 paragraph 는 별도 단락으로 둔다.
+                i += 1
+                continue
+
+            if t == "footnote_close":
+                i += 1
+                continue
+
+            if t == "footnote_anchor":
+                i += 1
+                continue
+
+            if t == "dl_open":
+                i += 1
+                continue
+            if t == "dl_close":
+                i += 1
+                continue
+            if t == "dt_open":
+                # 뒤따르는 inline 이 term
+                inline = tokens[i + 1]
+                para = self._new_paragraph(style_id=self.body_style)
+                para.add_run(
+                    inline.content if hasattr(inline, "content") else "",
+                    char_pr_id_ref=self.cp_bold,
+                )
+                i += 3  # dt_open, inline, dt_close
+                continue
+            if t == "dd_open":
+                # 뒤따르는 paragraph_open / inline / paragraph_close
+                # 들여쓴 정의 본문
+                if i + 2 < len(tokens) and tokens[i + 1].type == "paragraph_open":
+                    inline = tokens[i + 2]
+                    para = self._new_paragraph(style_id=self.body_style)
+                    para.add_run("  ", char_pr_id_ref=self.cp_regular)
+                    self._emit_inline_runs(para, inline.children or [])
+                    # skip dd_open, paragraph_open, inline, paragraph_close, dd_close
+                    i += 5
+                    continue
                 i += 1
                 continue
 
@@ -702,12 +1014,14 @@ class MarkdownHwpxRenderer:
             if t == "blockquote_open":
                 depth = sum(1 for _ in self.list_stack)
                 self.list_stack.append(("blockquote", depth))
+                self._bq_at_start = True
                 i += 1
                 continue
 
             if t == "blockquote_close":
                 if self.list_stack and self.list_stack[-1][0] == "blockquote":
                     self.list_stack.pop()
+                self._bq_at_start = False
                 i += 1
                 continue
 
@@ -739,6 +1053,7 @@ def _read_source(token: str) -> tuple[str, str]:
 
 def render_file(text: str, output: Path) -> Path:
     doc = HwpxDocument.new()
+    _apply_default_fonts(doc)
     renderer = MarkdownHwpxRenderer(doc)
     renderer.render(text)
     output.parent.mkdir(parents=True, exist_ok=True)

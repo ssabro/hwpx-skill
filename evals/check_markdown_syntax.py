@@ -18,11 +18,16 @@ lxml 로 파싱하고 정규식이 아닌 구조 기반으로 체크한다.
 
 from __future__ import annotations
 
+import io
 import sys
 import zipfile
 from pathlib import Path
 from collections import Counter
 from lxml import etree
+
+# Windows cp949 콘솔에서 한글/이모지 깨짐 방지
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"

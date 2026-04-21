@@ -373,14 +373,42 @@ python scripts/render_markdown.py README.md samples/README-T1.hwpx
 지원 문법 회귀 테스트는 `evals/` 에 묶여 있다:
 
 ```bash
-python scripts/render_markdown.py evals/markdown-syntax-sample.md out.hwpx
-python evals/check_markdown_syntax.py out.hwpx
+# 기본 문법 32 개
+python scripts/render_markdown.py evals/markdown-syntax-sample.md out1.hwpx
+python evals/check_markdown_syntax.py out1.hwpx
+
+# 확장 문법 36 개 (취소선 · 각주 · 수식 · 이모지 · GFM alerts · 첨자 등)
+python scripts/render_markdown.py evals/markdown-extended-sample.md out2.hwpx
+python evals/check_extended_syntax.py out2.hwpx
 ```
 
-`markdown-syntax-sample.md` 는 헤딩 6 레벨 · 강조 3 종 · 리스트(중첩
-포함) · 태스크 체크박스 · 링크 · 코드(fenced/indented/언어라벨) · 표 ·
-블록 인용 · 수평선 · 이미지(실존/미존재) 를 모두 포함하며,
-`check_markdown_syntax.py` 는 XML 구조 단에서 32 개 항목을 검증한다.
+### 지원 문법 요약 (36 개 항목 기준)
+
+완전 지원: 헤딩 6 레벨 · **굵게**·*기울임*·***굵은기울임*** · ~~취소선~~ ·
+인라인/블록 코드(언어라벨·들여쓰기·Mermaid 라벨) · 리스트(`-/*/+`, 숫자,
+체크박스, 중첩) · 링크(`[](url)`, `<URL>`, 참조 링크, linkify, 앵커) ·
+이미지(BinData 엔트리 + placeholder) · 인용문 · 수평선(3 종) · 표 · 각주
+(`[^n]`) · 정의 목록 · 줄바꿈(공백 2 칸 / `<br>` → ↵ 마커) · 이스케이프
+`\` · 수식 `$x$` / `$$x$$` (텍스트 보존) · 이모지 `:smile:` ·
+`==하이라이트==` (bold 폴백) · GFM Alerts `> [!NOTE/TIP/…]` · YAML
+frontmatter 스킵 · 숫자/영문 첨자 `~0-9~` `^0-9^` (유니코드 `₀⁰` 치환).
+
+부분 지원: Mermaid(텍스트 보존 + 라벨, 다이어그램 렌더는 외부 도구 필요).
+
+미지원 (평문 통과): HTML 태그 직접 사용 (의도) · 표 셀 정렬
+(`:---:`/`---:` 구문은 인식되지만 셀에 적용 미구현) · 문자 포함 첨자.
+
+### 기본 폰트 오버라이드
+
+환경변수로 기본 한글/영문 폰트를 지정 가능:
+
+```bash
+HWPX_RENDER_FONT="나눔고딕" HWPX_RENDER_FONT_LATIN="Source Code Pro" \
+    python scripts/render_markdown.py input.md out.hwpx
+```
+
+기본값은 `맑은 고딕 / Segoe UI` (Windows 표준 설치). 한컴 전용
+`함초롬돋움` 은 외부 뷰어에서 흐려지는 문제가 있어 교체.
 
 ---
 
