@@ -32,7 +32,12 @@ python -c "import hwpx" 2>/dev/null \
     || pip install python-hwpx \
     || pip install python-hwpx --break-system-packages
 
-# (2) 빌트인 스켈레톤이 존재하는가 (빌트인 경로로 보고서를 만들 때만)
+# (2) Markdown 서식 렌더링(§5-5)을 쓸 때만 — markdown-it-py 가 있는가
+python -c "import markdown_it" 2>/dev/null \
+    || pip install markdown-it-py \
+    || pip install markdown-it-py --break-system-packages
+
+# (3) 빌트인 스켈레톤이 존재하는가 (빌트인 경로로 보고서를 만들 때만)
 #     SKILL_DIR = 이 SKILL.md 가 있는 디렉터리.
 test -f "$SKILL_DIR/assets/report-skeleton.hwpx" \
     || python "$SKILL_DIR/scripts/build_report_skeleton.py" \
@@ -49,7 +54,14 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { pip install python-hwpx --break-system-packages }
 }
 
-# (2) 빌트인 스켈레톤 존재 여부 (빌트인 경로를 쓰려는 경우만)
+# (2) markdown-it-py — §5-5 를 쓸 때만
+python -c "import markdown_it" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    pip install markdown-it-py
+    if ($LASTEXITCODE -ne 0) { pip install markdown-it-py --break-system-packages }
+}
+
+# (3) 빌트인 스켈레톤 존재 여부 (빌트인 경로를 쓰려는 경우만)
 #     $SkillDir = 이 SKILL.md 가 있는 디렉터리
 $skel = Join-Path $SkillDir "assets\report-skeleton.hwpx"
 if (-not (Test-Path $skel)) {
@@ -60,9 +72,11 @@ if (-not (Test-Path $skel)) {
 `python` 이 `python3` 로만 잡히는 macOS·Linux 환경에서는 아래 규칙에
 따라 `sys.executable` 또는 `python3` 로 대체한다.
 
-사용자 업로드 양식만 쓸 예정이면 (2) 는 건너뛴다 (Section 2 참고).
-사용자 환경이 가상환경 없이 PEP 668 로 보호된 경우 (1) 의 세 번째
-분기로 `--break-system-packages` 가 자동으로 시도된다.
+사용자 업로드 양식만 쓸 예정이면 (3) 은 건너뛴다 (Section 2 참고).
+평문 덤프(§5-4) 만 쓸 때는 (2) 도 건너뛴다 — `dump_markdown.py` 는
+markdown-it-py 의존성이 없다. 사용자 환경이 가상환경 없이 PEP 668 로
+보호된 경우 각 단계의 세 번째 분기로 `--break-system-packages` 가
+자동으로 시도된다.
 
 ### 1-1. 파이썬 실행 관례
 
@@ -310,6 +324,41 @@ python scripts/dump_markdown.py README.md samples/README.hwpx
 ns prefix 를 한컴 표준으로 정리한다. `HwpxDocument.save_to_path` 를 사용해
 deprecated 경로를 피한다.
 
+### 5-5. Markdown 을 서식(제목·리스트·표 등) 있는 HWPX 로 렌더링
+
+`dump_markdown.py` 는 리터럴 덤프지만 `render_markdown.py` 는 Markdown
+문법을 실제 HWPX 스타일로 해석한다. 파서로 `markdown-it-py` 를 쓰고,
+`HwpxDocument.new()` 의 기본 스타일 테이블(개요 1~10, 바탕글)을 재사용해
+제목 계층을 적용한다. §1-0 자가 점검의 (2) 단계(markdown-it-py 설치)를
+먼저 통과해야 한다.
+
+```bash
+python scripts/render_markdown.py README.md samples/README-T1.hwpx
+```
+
+지원 범위는 단계적으로 확장된다:
+
+| 티어 | 처리 | 비고 |
+|------|------|------|
+| T1 | 제목(h1~h6) → 개요 스타일, 불릿/순서 리스트(중첩), 코드 블록, 수평선, 빈 단락 | 블록 구조 |
+| T2 | `**굵게**`/`*기울임*`/`` `인라인코드` `` 런, 표 렌더링 (`hp:tbl`) | 인라인 런 |
+| T3 | 링크 · 이미지 임베딩(BinData) · 블록 인용 · 체크박스 · 구문 강조 | 풀 피델리티 |
+
+구현 요점:
+
+- `doc.styles` 에서 "개요 N" 스타일을 이름으로 조회해 `style_id_ref` 로 적용.
+- 인라인 런(T2): `paragraph.add_run(text, bold=True, italic=True)` —
+  python-hwpx 의 `ensure_run_style` 이 `charPr` 를 자동 생성·재사용.
+- 표(T2): `doc.add_table(rows, cols)` 로 빈 격자 생성 후 셀별 텍스트 할당.
+- 이미지(T3): `doc.add_image(bytes, format)` 로 BinData 등록 → 저수준
+  `add_shape(shape_type="pic", binaryItemIDRef=...)` 로 단락에 부착.
+- 구문 강조(T3): `pygments` 로 토큰화 후 토큰 종류별 런 색상 지정
+  (선택 기능 — pygments 미설치 시 단순 모노스페이스로 폴백).
+
+평문 요약만 필요하면 §5-4 로, 구조화된 보고서면 §5-1 빌트인 스켈레톤을
+먼저 고려한다. `render_markdown.py` 는 "입력 자체가 Markdown 인 문서를
+서식 있는 HWPX 로 내보낼 때" 의 중간 지점이다.
+
 ---
 
 ## 6. ⚠️ 필수 후처리 — 네임스페이스 정규화
@@ -395,4 +444,3 @@ subprocess.run([sys.executable, cli, "output.hwpx"], check=True)
 15. **Windows 콘솔 한글 깨짐**: CP949 기본 콘솔에서 `print()` 가 깨져 보이면
     `PYTHONIOENCODING=utf-8` 을 설정하거나 결과를 파일로 쓴다. .hwpx 내부
     XML 은 항상 UTF-8 로 저장되므로 데이터에는 영향 없다.
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
