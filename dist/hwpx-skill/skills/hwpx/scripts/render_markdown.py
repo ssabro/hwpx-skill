@@ -227,6 +227,50 @@ def _ensure_code_charpr(doc: HwpxDocument, *, mono_font_id_latin: int | None) ->
     return new_el.get("id")
 
 
+# 제목 레벨별 글자 크기(1/100 pt). 워드 기본 헤딩 사이즈와 유사.
+HEADING_HEIGHTS = {
+    1: 2200,  # 22pt
+    2: 1800,  # 18pt
+    3: 1600,  # 16pt
+    4: 1400,  # 14pt
+    5: 1200,  # 12pt
+    6: 1100,  # 11pt
+}
+
+
+def _ensure_heading_charpr(doc: HwpxDocument, level: int) -> str:
+    """레벨별 헤딩 run 용 charPr (큰 글자 + 굵게) id 반환.
+
+    HwpxDocument.new() 기본 템플릿의 "개요 1~10" 스타일은 paraPrIDRef
+    만 다르고 charPrIDRef 가 모두 "0"(=본문 10pt 바탕글) 이다. 따라서
+    스타일만 적용하면 제목이 본문과 동일한 글자 크기로 렌더된다. 이
+    헬퍼는 레벨별로 큰 글자 + bold 인 전용 charPr 을 생성해 런 레벨에서
+    직접 참조하게 한다.
+    """
+    height = str(HEADING_HEIGHTS.get(level, 1100))
+    header = doc.headers[0]
+
+    def predicate(el) -> bool:
+        if el.get("height") != height:
+            return False
+        return el.find(f"{_HH}bold") is not None and el.find(f"{_HH}italic") is None
+
+    def modifier(el) -> None:
+        el.set("height", height)
+        for b in list(el.findall(f"{_HH}bold")):
+            el.remove(b)
+        _LXML_ET.SubElement(el, f"{_HH}bold")
+        for it in list(el.findall(f"{_HH}italic")):
+            el.remove(it)
+
+    new_el = header.ensure_char_property(
+        predicate=predicate,
+        modifier=modifier,
+        base_char_pr_id="0",
+    )
+    return new_el.get("id")
+
+
 # --------------------------------------------------------------------------- #
 # 리스트 마커                                                                 #
 # --------------------------------------------------------------------------- #
@@ -264,6 +308,10 @@ class MarkdownHwpxRenderer:
         self.cp_link = _ensure_link_charpr(doc)
         mono_latin = _add_font(doc, "Consolas", "LATIN")
         self.cp_code = _ensure_code_charpr(doc, mono_font_id_latin=mono_latin)
+        # T4 — 헤딩 전용 charPr (레벨별 큰 글자 + 굵게)
+        self.heading_cp = {
+            lvl: _ensure_heading_charpr(doc, lvl) for lvl in range(1, 7)
+        }
         # 리스트 상태: 스택 기반 중첩 추적
         # 각 항목: ("bullet", depth) / ("ordered", depth, next_number) / ("blockquote", depth)
         self.list_stack: list = []
@@ -295,6 +343,24 @@ class MarkdownHwpxRenderer:
         if style_id is not None:
             kwargs["style_id_ref"] = style_id
         return self.doc.add_paragraph("", **kwargs)
+
+    def _emit_inline_flat(self, para, children: Iterable, cp_id: str) -> None:
+        """헤딩/캡션처럼 단일 스타일을 유지해야 하는 단락용.
+
+        markdown 인라인 중 text / code_inline / softbreak / hardbreak 의
+        텍스트만 추출해 모두 ``cp_id`` 로 출력한다. strong/em/link 마커는
+        본문 텍스트만 남기고 형식은 무시한다.
+        """
+        for tok in children:
+            t = tok.type
+            if t == "text":
+                if tok.content:
+                    para.add_run(tok.content, char_pr_id_ref=cp_id)
+            elif t == "code_inline":
+                para.add_run(f"`{tok.content}`", char_pr_id_ref=cp_id)
+            elif t in ("softbreak", "hardbreak"):
+                para.add_run(" ", char_pr_id_ref=cp_id)
+            # strong_open/close, em_open/close, link_open/close, image → 평탄화로 스킵
 
     def _emit_inline_runs(self, para, children: Iterable) -> None:
         """markdown-it inline 토큰의 children 을 순회하며 run 을 추가."""
@@ -477,8 +543,12 @@ class MarkdownHwpxRenderer:
                 level = int(tok.tag[1:])  # 'h1' → 1
                 inline = tokens[i + 1]
                 style = self.heading_styles.get(level) or self.body_style
+                cp = self.heading_cp.get(level) or self.cp_regular
                 para = self._new_paragraph(style_id=style)
-                self._emit_inline_runs(para, inline.children or [])
+                # 헤딩 내 인라인 서식(굵게·기울임·링크·코드) 은 평탄화한다.
+                # 헤딩 텍스트 전체가 큰 글자 + 굵게이기 때문에 강조가 의미가 없고,
+                # 추가 charPr 파생을 억제해 파일 크기도 줄인다.
+                self._emit_inline_flat(para, inline.children or [], cp)
                 i += 3
                 continue
 

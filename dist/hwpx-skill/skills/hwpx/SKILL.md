@@ -343,6 +343,7 @@ python scripts/render_markdown.py README.md samples/README-T1.hwpx
 | T1 | 제목 h1~h6 → "개요 1~6" 스타일, 불릿/순서 리스트(중첩, 마커 `•/◦/▪/▫`), 코드 블록, 수평선(─), 빈 단락 |
 | T2 | `**굵게**` / `*기울임*` / `***굵은기울임***` 인라인 런 — 전용 charPr 자동 생성. 표(`| a \| b \|`) → `doc.add_table(rows, cols)` + 셀별 text 할당 |
 | T3 | 링크 `[text](url)` → 파란색 + 밑줄 + URL 괄호 표기. GFM 체크박스 `- [ ]/[x]` → `☐/☑`. 인라인코드 `` `x` `` / 코드블록 → Consolas + 연한 음영. 이미지 `![alt](path)` → `doc.add_image` 로 BinData 엔트리 생성 + 본문에 `[🖼 alt • BinData/BIN####.ext]` placeholder (완전한 `hp:pic` shape 렌더는 추후) |
+| T4 | 헤딩이 뷰어에서 실제로 커 보이도록 **레벨별 전용 charPr(큰 글자+굵게)** 생성 — H1=22pt, H2=18pt, H3=16pt, H4=14pt, H5=12pt, H6=11pt. 헤딩 내 인라인 서식은 평탄화(굵게/기울임/링크/코드 마커 무시, 텍스트만 유지). `HwpxDocument.new()` 기본 템플릿의 "개요 1~10" 스타일이 전부 `charPrIDRef="0"` (=본문 10pt) 만 참조하는 구조적 한계를 우회. |
 
 구현 요점:
 
