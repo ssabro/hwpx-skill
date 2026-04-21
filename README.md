@@ -51,7 +51,28 @@ hwpx-skill/
 
 ### B) 수동 설치
 
-#### 1) Python 의존성
+#### 1) 저장소 내려받기
+
+```bash
+# git 으로 클론 (권장 — 이후 git pull 로 업데이트 가능)
+git clone https://github.com/ssabro/hwpx-skill.git
+cd hwpx-skill
+```
+
+git 이 없거나 특정 시점만 쓰고 싶다면 ZIP 아카이브를 받아도 된다:
+
+```bash
+# macOS / Linux
+curl -L https://github.com/ssabro/hwpx-skill/archive/refs/heads/main.tar.gz | tar -xz
+cd hwpx-skill-main
+
+# Windows (PowerShell)
+Invoke-WebRequest https://github.com/ssabro/hwpx-skill/archive/refs/heads/main.zip -OutFile hwpx-skill.zip
+Expand-Archive hwpx-skill.zip -DestinationPath .
+Set-Location hwpx-skill-main
+```
+
+#### 2) Python 의존성
 
 ```bash
 pip install python-hwpx
@@ -59,7 +80,7 @@ pip install python-hwpx
 pip install python-hwpx --break-system-packages
 ```
 
-#### 2) 스킬을 Claude Code 로 연결
+#### 3) 스킬을 Claude Code 로 연결
 
 ```bash
 # macOS / Linux
@@ -69,7 +90,7 @@ cp -r . ~/.claude/skills/hwpx
 robocopy . "$env:USERPROFILE\.claude\skills\hwpx" /E
 ```
 
-#### 3) 스켈레톤 1 회 생성
+#### 4) 스켈레톤 1 회 생성
 
 ```bash
 python scripts/build_report_skeleton.py
