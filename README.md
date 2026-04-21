@@ -136,7 +136,7 @@ doc.add_paragraph("2. 2026 년도 정보화 교육을 다음과 같이 안내하
 doc.add_paragraph("  가. 일시: 2026. 3. 10.(화) 14:00 ∼ 16:00")
 doc.add_paragraph("붙임  일정표 1부.  끝.")
 
-doc.save("letter.hwpx")
+doc.save_to_path("letter.hwpx")
 normalize_namespaces_in_place("letter.hwpx")
 ```
 

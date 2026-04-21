@@ -35,13 +35,30 @@ python -c "import hwpx" 2>/dev/null \
 # (2) 빌트인 스켈레톤이 존재하는가 (빌트인 경로로 보고서를 만들 때만)
 #     SKILL_DIR = 이 SKILL.md 가 있는 디렉터리.
 test -f "$SKILL_DIR/assets/report-skeleton.hwpx" \
-    || python "$SKILL_DIR/scripts/build_report_skeleton.py"
+    || python "$SKILL_DIR/scripts/build_report_skeleton.py" \
+           "$SKILL_DIR/assets/report-skeleton.hwpx"
 ```
 
-PowerShell 환경에서도 흐름은 동일하다 — `python -c "import hwpx"` 의
-exit code 로 분기하고 `Test-Path` 로 스켈레톤을 점검한다. `python` 이
-`python3` 로만 잡히는 macOS·Linux 환경에서는 아래 규칙에 따라
-`sys.executable` 또는 `python3` 로 대체한다.
+Windows PowerShell 에서는 같은 흐름을 아래로 쓴다:
+
+```powershell
+# (1) python-hwpx import 여부
+python -c "import hwpx" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    pip install python-hwpx
+    if ($LASTEXITCODE -ne 0) { pip install python-hwpx --break-system-packages }
+}
+
+# (2) 빌트인 스켈레톤 존재 여부 (빌트인 경로를 쓰려는 경우만)
+#     $SkillDir = 이 SKILL.md 가 있는 디렉터리
+$skel = Join-Path $SkillDir "assets\report-skeleton.hwpx"
+if (-not (Test-Path $skel)) {
+    python (Join-Path $SkillDir "scripts\build_report_skeleton.py") $skel
+}
+```
+
+`python` 이 `python3` 로만 잡히는 macOS·Linux 환경에서는 아래 규칙에
+따라 `sys.executable` 또는 `python3` 로 대체한다.
 
 사용자 업로드 양식만 쓸 예정이면 (2) 는 건너뛴다 (Section 2 참고).
 사용자 환경이 가상환경 없이 PEP 668 로 보호된 경우 (1) 의 세 번째
@@ -271,9 +288,27 @@ doc.add_paragraph("  다. 대상: 전 직원")
 doc.add_paragraph("")
 doc.add_paragraph("붙임  2026학년도 정보화 교육 일정표 1부.  끝.")
 
-doc.save("letter.hwpx")
+doc.save_to_path("letter.hwpx")
 normalize_namespaces_in_place("letter.hwpx")
 ```
+
+> `HwpxDocument.new()` 호출 직후 stderr 에 "manifest 에서 masterPage/history/version 을 찾지 못해 fallback 을 사용합니다" 3 줄이 찍히는 것은 정상 동작이다. 최소 manifest 로 시작하기 때문이며 저장 결과에는 영향이 없다.
+
+### 5-4. Markdown 파일을 그대로 hwpx 로 덤프 (샘플/미리보기 용)
+
+README·CHANGELOG 같은 마크다운 문서를 빠르게 .hwpx 로 떨어뜨릴 때 쓴다.
+마크다운 문법(`#`, 백틱, `-` 등) 은 렌더링하지 않고 **리터럴 텍스트 그대로**
+단락으로 넣는다. 스타일링된 보고서가 필요하면 §5-1 을 쓴다.
+
+```bash
+# INPUT.md → OUTPUT.hwpx (OUTPUT 생략 시 INPUT 이름 + .hwpx)
+python scripts/dump_markdown.py README.md samples/README.hwpx
+```
+
+내부 동작: `HwpxDocument.new()` + `add_paragraph(line)` 로 한 줄씩 적재,
+연속 빈 줄은 1 개로 축약, 저장 후 `normalize_namespaces_in_place` 로
+ns prefix 를 한컴 표준으로 정리한다. `HwpxDocument.save_to_path` 를 사용해
+deprecated 경로를 피한다.
 
 ---
 
@@ -354,4 +389,10 @@ subprocess.run([sys.executable, cli, "output.hwpx"], check=True)
 12. **보안 — 경로 이탈 방어**: 로드 시 `..` 포함 엔트리를 거부한다.
 13. **크로스 플랫폼**: 파이썬 실행은 `sys.executable`, 경로는
     `pathlib.Path` 또는 `os.path.join`.
+14. **`HwpxPackage` 는 `with` 전용**: `close()` 메서드를 제공하지 않는다.
+    반드시 `with HwpxPackage.open(...) as pkg:` 패턴으로 쓴다. 컨텍스트를
+    벗어날 때 자원이 해제된다.
+15. **Windows 콘솔 한글 깨짐**: CP949 기본 콘솔에서 `print()` 가 깨져 보이면
+    `PYTHONIOENCODING=utf-8` 을 설정하거나 결과를 파일로 쓴다. .hwpx 내부
+    XML 은 항상 UTF-8 로 저장되므로 데이터에는 영향 없다.
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
