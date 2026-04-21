@@ -31,6 +31,7 @@ from typing import Iterable
 
 try:
     from hwpx.document import HwpxDocument
+    import hwpx.oxml.document as _hwpx_oxml  # noqa: F401 — for _HH constant
 except ImportError:  # pragma: no cover
     sys.stderr.write("error: python-hwpx 가 설치되지 않았습니다.\n")
     raise SystemExit(1)
@@ -44,12 +45,17 @@ except ImportError:  # pragma: no cover
     )
     raise SystemExit(1)
 
+from lxml import etree as _LXML_ET  # python-hwpx 내부와 호환되는 요소 빌더
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hwpx_toolkit import normalize_namespaces_in_place  # noqa: E402
 
 
+_HH = _hwpx_oxml._HH  # "{http://www.hancom.co.kr/hwpml/2011/head}"
+
+
 # --------------------------------------------------------------------------- #
-# 스타일 ID 조회                                                              #
+# 스타일 ID 조회 / 생성                                                       #
 # --------------------------------------------------------------------------- #
 
 # `HwpxDocument.new()` 의 기본 템플릿에는 "바탕글", "본문", "개요 1~10",
@@ -71,6 +77,70 @@ def _style_id_by_name(doc: HwpxDocument, name: str) -> str | None:
         if getattr(style, "name", None) == name:
             return str(sid)
     return None
+
+
+def _char_style_flags(element) -> tuple[bool, bool, bool]:
+    """(bold, italic, underline-active) 플래그 추출."""
+    bold = element.find(f"{_HH}bold") is not None
+    italic = element.find(f"{_HH}italic") is not None
+    underline_el = element.find(f"{_HH}underline")
+    underline = (
+        underline_el is not None
+        and (underline_el.get("type") or "").upper() != "NONE"
+    )
+    return bold, italic, underline
+
+
+def _ensure_char_style(
+    doc: HwpxDocument,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    underline: bool = False,
+) -> str:
+    """Bold/Italic/Underline 조합에 맞는 charPr 를 찾거나 새로 만들고 id 반환.
+
+    python-hwpx 2.9.0 의 `ensure_run_style` 은 stdlib ``ElementTree.SubElement``
+    와 ``lxml`` 요소를 섞어 쓰다가 ``TypeError`` 로 크래시한다. 우리는
+    `header.ensure_char_property` 를 직접 호출하고 modifier 를 lxml 기반으로
+    작성해서 우회한다.
+    """
+    header = doc.headers[0]
+    target = (bool(bold), bool(italic), bool(underline))
+
+    def predicate(el) -> bool:
+        return _char_style_flags(el) == target
+
+    def modifier(el) -> None:
+        # 기존 bold/italic 마커 제거
+        for tag in ("bold", "italic"):
+            for child in list(el.findall(f"{_HH}{tag}")):
+                el.remove(child)
+        # underline 은 항상 존재하는 구조라 type 만 교체
+        underline_nodes = list(el.findall(f"{_HH}underline"))
+        base_underline_attrs = (
+            dict(underline_nodes[0].attrib) if underline_nodes else {}
+        )
+        for node in underline_nodes:
+            el.remove(node)
+
+        if bold:
+            _LXML_ET.SubElement(el, f"{_HH}bold")
+        if italic:
+            _LXML_ET.SubElement(el, f"{_HH}italic")
+
+        ul_attrs = dict(base_underline_attrs)
+        ul_attrs["type"] = "SOLID" if underline else "NONE"
+        ul_attrs.setdefault("shape", "SOLID")
+        ul_attrs.setdefault("color", "#000000")
+        _LXML_ET.SubElement(el, f"{_HH}underline", ul_attrs)
+
+    new_el = header.ensure_char_property(
+        predicate=predicate,
+        modifier=modifier,
+        base_char_pr_id="0",
+    )
+    return new_el.get("id")
 
 
 # --------------------------------------------------------------------------- #
@@ -100,8 +170,14 @@ class MarkdownHwpxRenderer:
             lvl: _style_id_by_name(doc, name)
             for lvl, name in HEADING_STYLE_NAMES.items()
         }
-        # 리스트 상태: 스택 기반으로 중첩 추적
-        # 각 항목: ("bullet", depth) 또는 ("ordered", depth, next_number)
+        # 인라인 런 스타일 — 문서 생성 시 1 회만 만든다.
+        self.cp_regular = _ensure_char_style(doc)
+        self.cp_bold = _ensure_char_style(doc, bold=True)
+        self.cp_italic = _ensure_char_style(doc, italic=True)
+        self.cp_bold_italic = _ensure_char_style(doc, bold=True, italic=True)
+        self.cp_underline = _ensure_char_style(doc, underline=True)
+        # 리스트 상태: 스택 기반 중첩 추적
+        # 각 항목: ("bullet", depth) / ("ordered", depth, next_number) / ("blockquote", depth)
         self.list_stack: list = []
 
     # ---- 공개 진입점 ---- #
@@ -111,30 +187,149 @@ class MarkdownHwpxRenderer:
         tokens = md.parse(markdown_text)
         self._render_tokens(tokens)
 
-    # ---- 내부 로직 ---- #
+    # ---- 런 스타일 결정 ---- #
 
-    def _add_para(self, text: str, *, style_id: str | None = None) -> None:
-        kwargs = {}
+    def _run_style_id(self, *, bold: bool, italic: bool) -> str:
+        if bold and italic:
+            return self.cp_bold_italic
+        if bold:
+            return self.cp_bold
+        if italic:
+            return self.cp_italic
+        return self.cp_regular
+
+    # ---- 단락 / 인라인 ---- #
+
+    def _new_paragraph(self, *, style_id: str | None = None):
+        kwargs = {"include_run": False}
         if style_id is not None:
             kwargs["style_id_ref"] = style_id
-        self.doc.add_paragraph(text, **kwargs)
+        return self.doc.add_paragraph("", **kwargs)
+
+    def _emit_inline_runs(self, para, children: Iterable) -> None:
+        """markdown-it inline 토큰의 children 을 순회하며 run 을 추가."""
+        bold = False
+        italic = False
+        for tok in children:
+            t = tok.type
+            if t == "strong_open":
+                bold = True
+            elif t == "strong_close":
+                bold = False
+            elif t == "em_open":
+                italic = True
+            elif t == "em_close":
+                italic = False
+            elif t == "text":
+                if tok.content:
+                    para.add_run(
+                        tok.content,
+                        char_pr_id_ref=self._run_style_id(bold=bold, italic=italic),
+                    )
+            elif t == "code_inline":
+                # T2: 백틱 + 굵게로 시각적 구분 (T3 에서 monospace + 음영)
+                para.add_run(
+                    f"`{tok.content}`",
+                    char_pr_id_ref=self.cp_bold,
+                )
+            elif t == "softbreak":
+                # 소프트 줄바꿈 → 단락 내부에서는 공백으로 취급
+                para.add_run(" ", char_pr_id_ref=self.cp_regular)
+            elif t == "hardbreak":
+                # 하드 줄바꿈 — 본래 새 단락이 맞지만 인라인 컨텍스트에서
+                # 단순화를 위해 공백으로 대체
+                para.add_run("  ", char_pr_id_ref=self.cp_regular)
+            elif t == "link_open":
+                # T3 에서 하이퍼링크. T2 에서는 밑줄 런으로만 표시.
+                bold_before, italic_before = bold, italic
+                # 밑줄 on 상태로 표시하기 위해 별도 id 를 쓰지만 본 구현에서는
+                # text 토큰이 올 때 계속 기본 스타일만 참조한다. 간단화를 위해
+                # 일단 flag 변화만 예약.
+                tok._saved = (bold_before, italic_before)
+            elif t == "link_close":
+                pass
+            # 그 외(softbreak, image, s_open 등) — T3 에서 처리
+            else:
+                if hasattr(tok, "content") and tok.content:
+                    para.add_run(
+                        tok.content,
+                        char_pr_id_ref=self._run_style_id(bold=bold, italic=italic),
+                    )
 
     def _current_list_prefix(self) -> str:
         """현재 리스트 스택 상태에서 사용할 들여쓰기 + 마커 문자열."""
         if not self.list_stack:
             return ""
         frame = self.list_stack[-1]
+        kind = frame[0]
         depth = frame[1]
         indent = LIST_INDENT * depth
-        if frame[0] == "ordered":
+        if kind == "ordered":
             num = frame[2]
             return f"{indent}{num}. "
+        if kind == "blockquote":
+            return f"{indent}│ "  # 세로 파이프로 인용 표시
         return f"{indent}{_bullet_for_depth(depth)} "
 
     def _bump_list_counter(self) -> None:
         if self.list_stack and self.list_stack[-1][0] == "ordered":
             kind, depth, num = self.list_stack[-1]
             self.list_stack[-1] = (kind, depth, num + 1)
+
+    # ---- 표 ---- #
+
+    def _render_table(self, tokens: list, start: int) -> int:
+        """table_open 에서 시작해 table_close 까지 소비. 끝 인덱스+1 반환."""
+        # 토큰 스캔으로 행/열 수 산출
+        rows: list[list[str]] = []
+        current_row: list[str] = []
+        cell_text_buf: list[str] = []
+        in_cell = False
+        i = start + 1
+        depth_table = 1
+        while i < len(tokens) and depth_table > 0:
+            tok = tokens[i]
+            t = tok.type
+            if t == "table_open":
+                depth_table += 1
+            elif t == "table_close":
+                depth_table -= 1
+                if depth_table == 0:
+                    break
+            elif t in ("thead_open", "thead_close", "tbody_open", "tbody_close"):
+                pass
+            elif t == "tr_open":
+                current_row = []
+            elif t == "tr_close":
+                rows.append(current_row)
+            elif t in ("th_open", "td_open"):
+                in_cell = True
+                cell_text_buf = []
+            elif t in ("th_close", "td_close"):
+                in_cell = False
+                current_row.append("".join(cell_text_buf))
+            elif t == "inline" and in_cell:
+                # 셀 내부 인라인 — T2 에서는 평문으로
+                cell_text_buf.append(tok.content)
+            i += 1
+
+        if not rows:
+            return i + 1
+
+        n_rows = len(rows)
+        n_cols = max(len(r) for r in rows)
+        table = self.doc.add_table(rows=n_rows, cols=n_cols)
+        for ri, row in enumerate(rows):
+            for ci in range(n_cols):
+                txt = row[ci] if ci < len(row) else ""
+                try:
+                    table.rows[ri].cells[ci].text = txt
+                except Exception:
+                    # 셀 구조가 특이하면 조용히 스킵
+                    pass
+        return i + 1  # skip table_close
+
+    # ---- 메인 루프 ---- #
 
     def _render_tokens(self, tokens: list) -> None:
         i = 0
@@ -146,25 +341,29 @@ class MarkdownHwpxRenderer:
                 level = int(tok.tag[1:])  # 'h1' → 1
                 inline = tokens[i + 1]
                 style = self.heading_styles.get(level) or self.body_style
-                self._add_para(inline.content, style_id=style)
+                para = self._new_paragraph(style_id=style)
+                self._emit_inline_runs(para, inline.children or [])
                 i += 3
                 continue
 
             if t == "paragraph_open":
                 inline = tokens[i + 1]
-                text = self._current_list_prefix() + inline.content
-                self._add_para(text, style_id=self.body_style)
+                para = self._new_paragraph(style_id=self.body_style)
+                prefix = self._current_list_prefix()
+                if prefix:
+                    para.add_run(prefix, char_pr_id_ref=self.cp_regular)
+                self._emit_inline_runs(para, inline.children or [])
                 i += 3
                 continue
 
             if t == "bullet_list_open":
-                depth = sum(1 for f in self.list_stack if True)
+                depth = sum(1 for _ in self.list_stack)
                 self.list_stack.append(("bullet", depth))
                 i += 1
                 continue
 
             if t == "ordered_list_open":
-                depth = sum(1 for f in self.list_stack if True)
+                depth = sum(1 for _ in self.list_stack)
                 start = int(tok.attrGet("start") or 1)
                 self.list_stack.append(("ordered", depth, start))
                 i += 1
@@ -177,7 +376,6 @@ class MarkdownHwpxRenderer:
                 continue
 
             if t == "list_item_open":
-                # 마커만 준비 — 뒤따라오는 paragraph_open 이 본문을 낸다.
                 i += 1
                 continue
 
@@ -188,24 +386,24 @@ class MarkdownHwpxRenderer:
 
             if t == "fence" or t == "code_block":
                 lang = (tok.info or "").strip()
-                if lang:
-                    self._add_para(f"```{lang}", style_id=self.body_style)
-                else:
-                    self._add_para("```", style_id=self.body_style)
+                para = self._new_paragraph(style_id=self.body_style)
+                para.add_run(f"```{lang}" if lang else "```", char_pr_id_ref=self.cp_bold)
                 for line in tok.content.splitlines() or [""]:
-                    self._add_para(line, style_id=self.body_style)
-                self._add_para("```", style_id=self.body_style)
+                    p = self._new_paragraph(style_id=self.body_style)
+                    p.add_run(line, char_pr_id_ref=self.cp_regular)
+                para_end = self._new_paragraph(style_id=self.body_style)
+                para_end.add_run("```", char_pr_id_ref=self.cp_bold)
                 i += 1
                 continue
 
             if t == "hr":
-                self._add_para("─" * 40, style_id=self.body_style)
+                para = self._new_paragraph(style_id=self.body_style)
+                para.add_run("─" * 40, char_pr_id_ref=self.cp_regular)
                 i += 1
                 continue
 
             if t == "blockquote_open":
-                # T1 에서는 "> " 접두어로만 표시. T3 에서 들여쓰기·테두리.
-                depth = sum(1 for f in self.list_stack if True)
+                depth = sum(1 for _ in self.list_stack)
                 self.list_stack.append(("blockquote", depth))
                 i += 1
                 continue
@@ -217,18 +415,14 @@ class MarkdownHwpxRenderer:
                 continue
 
             if t == "table_open":
-                # T2 에서 구현. T1 에서는 원문 텍스트로 일단 덤프.
-                j = i + 1
-                while j < len(tokens) and tokens[j].type != "table_close":
-                    j += 1
-                self._add_para("[표: T2 에서 렌더링 예정]", style_id=self.body_style)
-                i = j + 1
+                i = self._render_table(tokens, i)
                 continue
 
-            # 기타 블록 (html_block 등) — 원문을 단락으로
+            # 기타 블록 — 평문 덤프
             if hasattr(tok, "content") and tok.content:
                 for line in tok.content.splitlines():
-                    self._add_para(line, style_id=self.body_style)
+                    p = self._new_paragraph(style_id=self.body_style)
+                    p.add_run(line, char_pr_id_ref=self.cp_regular)
             i += 1
 
 
