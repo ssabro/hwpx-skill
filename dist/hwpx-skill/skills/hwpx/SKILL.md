@@ -370,6 +370,18 @@ python scripts/render_markdown.py README.md samples/README-T1.hwpx
 먼저 고려한다. `render_markdown.py` 는 "입력 자체가 Markdown 인 문서를
 서식 있는 HWPX 로 내보낼 때" 의 중간 지점이다.
 
+지원 문법 회귀 테스트는 `evals/` 에 묶여 있다:
+
+```bash
+python scripts/render_markdown.py evals/markdown-syntax-sample.md out.hwpx
+python evals/check_markdown_syntax.py out.hwpx
+```
+
+`markdown-syntax-sample.md` 는 헤딩 6 레벨 · 강조 3 종 · 리스트(중첩
+포함) · 태스크 체크박스 · 링크 · 코드(fenced/indented/언어라벨) · 표 ·
+블록 인용 · 수평선 · 이미지(실존/미존재) 를 모두 포함하며,
+`check_markdown_syntax.py` 는 XML 구조 단에서 32 개 항목을 검증한다.
+
 ---
 
 ## 6. ⚠️ 필수 후처리 — 네임스페이스 정규화
