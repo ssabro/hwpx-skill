@@ -610,8 +610,10 @@ class MarkdownHwpxRenderer:
                 )
                 for line in tok.content.splitlines() or [""]:
                     p = self._new_paragraph(style_id=self.body_style)
-                    # T3: 본문 라인은 모노스페이스 + 음영
-                    p.add_run(line, char_pr_id_ref=self.cp_code)
+                    # T3: 모노스페이스 + 음영 (뷰어/폰트 환경에 따라 안 보일 수 있음)
+                    # T4+: 좌측 gutter ▏ 를 덧붙여 shadeColor / Consolas 폰트가
+                    #      렌더 안 되는 뷰어에서도 코드 라인임을 항상 구분 가능.
+                    p.add_run(f"▏ {line}", char_pr_id_ref=self.cp_code)
                 para_end = self._new_paragraph(style_id=self.body_style)
                 para_end.add_run("```", char_pr_id_ref=self.cp_bold)
                 i += 1
