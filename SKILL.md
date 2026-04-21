@@ -336,24 +336,34 @@ deprecated 경로를 피한다.
 python scripts/render_markdown.py README.md samples/README-T1.hwpx
 ```
 
-지원 범위는 단계적으로 확장된다:
+지원 범위(실제 구현 기준):
 
-| 티어 | 처리 | 비고 |
-|------|------|------|
-| T1 | 제목(h1~h6) → 개요 스타일, 불릿/순서 리스트(중첩), 코드 블록, 수평선, 빈 단락 | 블록 구조 |
-| T2 | `**굵게**`/`*기울임*`/`` `인라인코드` `` 런, 표 렌더링 (`hp:tbl`) | 인라인 런 |
-| T3 | 링크 · 이미지 임베딩(BinData) · 블록 인용 · 체크박스 · 구문 강조 | 풀 피델리티 |
+| 티어 | 처리 범위 |
+|------|----------|
+| T1 | 제목 h1~h6 → "개요 1~6" 스타일, 불릿/순서 리스트(중첩, 마커 `•/◦/▪/▫`), 코드 블록, 수평선(─), 빈 단락 |
+| T2 | `**굵게**` / `*기울임*` / `***굵은기울임***` 인라인 런 — 전용 charPr 자동 생성. 표(`| a \| b \|`) → `doc.add_table(rows, cols)` + 셀별 text 할당 |
+| T3 | 링크 `[text](url)` → 파란색 + 밑줄 + URL 괄호 표기. GFM 체크박스 `- [ ]/[x]` → `☐/☑`. 인라인코드 `` `x` `` / 코드블록 → Consolas + 연한 음영. 이미지 `![alt](path)` → `doc.add_image` 로 BinData 엔트리 생성 + 본문에 `[🖼 alt • BinData/BIN####.ext]` placeholder (완전한 `hp:pic` shape 렌더는 추후) |
 
 구현 요점:
 
 - `doc.styles` 에서 "개요 N" 스타일을 이름으로 조회해 `style_id_ref` 로 적용.
-- 인라인 런(T2): `paragraph.add_run(text, bold=True, italic=True)` —
-  python-hwpx 의 `ensure_run_style` 이 `charPr` 를 자동 생성·재사용.
-- 표(T2): `doc.add_table(rows, cols)` 로 빈 격자 생성 후 셀별 텍스트 할당.
-- 이미지(T3): `doc.add_image(bytes, format)` 로 BinData 등록 → 저수준
-  `add_shape(shape_type="pic", binaryItemIDRef=...)` 로 단락에 부착.
-- 구문 강조(T3): `pygments` 로 토큰화 후 토큰 종류별 런 색상 지정
-  (선택 기능 — pygments 미설치 시 단순 모노스페이스로 폴백).
+- 인라인 런: `paragraph.add_run(text, char_pr_id_ref=...)` 에 미리 생성한
+  charPr id 를 직접 전달. python-hwpx 2.9.0 의 `ensure_run_style` 이
+  내부 버그(stdlib `ElementTree.SubElement` 로 lxml 요소에 자식을 붙여
+  `TypeError`) 를 내므로 `_ensure_char_style` 헬퍼가 `header.ensure_char_property`
+  를 lxml 기반 modifier 로 호출해 우회한다.
+- 표: `doc.add_table(rows, cols)` 로 빈 격자 생성 후 `row.cells[j].text = ...`
+  로 채운다. thead/tbody 를 관통해 모든 행을 수집한다.
+- 링크/코드 charPr: `_ensure_link_charpr` (color+underline),
+  `_ensure_code_charpr` (shadeColor + 모노스페이스 fontRef). 모노스페이스
+  폰트는 `_add_font(doc, "Consolas", "LATIN")` 로 fontface 테이블에 주입.
+- 이미지: `doc.add_image(bytes, format)` 가 `BinData/BIN####.ext` 엔트리를
+  ZIP 에 추가하고 manifest item id 를 돌려준다. 현 구현은 본문에 텍스트
+  placeholder 만 남기고 실제 pic shape XML 은 생성하지 않는다. 임베드된
+  이미지는 `render_markdown.py` 실행 후 `zipfile` 로 BinData 엔트리를
+  확인할 수 있다.
+- 블록 인용: 간이 `│` 접두어 표시. paraPr 레벨 왼쪽 여백·테두리 적용은
+  저수준 XML 작업이 필요해 미구현.
 
 평문 요약만 필요하면 §5-4 로, 구조화된 보고서면 §5-1 빌트인 스켈레톤을
 먼저 고려한다. `render_markdown.py` 는 "입력 자체가 Markdown 인 문서를

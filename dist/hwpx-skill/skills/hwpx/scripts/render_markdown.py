@@ -144,6 +144,90 @@ def _ensure_char_style(
 
 
 # --------------------------------------------------------------------------- #
+# T3 — 폰트 / 링크 / 코드 스타일                                             #
+# --------------------------------------------------------------------------- #
+
+
+def _add_font(doc: HwpxDocument, face: str, lang: str) -> int | None:
+    """주어진 언어의 fontface 에 글꼴을 추가하고 id 반환. 이미 있으면 그 id."""
+    header = doc.headers[0]
+    for ff in header.element.iter(f"{_HH}fontface"):
+        if ff.get("lang") != lang:
+            continue
+        for f in ff.findall(f"{_HH}font"):
+            if f.get("face") == face:
+                return int(f.get("id"))
+        existing_ids = [int(f.get("id")) for f in ff.findall(f"{_HH}font")]
+        new_id = max(existing_ids, default=-1) + 1
+        new_font = _LXML_ET.SubElement(ff, f"{_HH}font")
+        new_font.set("id", str(new_id))
+        new_font.set("face", face)
+        new_font.set("type", "TTF")
+        new_font.set("isEmbedded", "0")
+        ff.set("fontCnt", str(len(ff.findall(f"{_HH}font"))))
+        header.mark_dirty()
+        return new_id
+    return None
+
+
+def _ensure_link_charpr(doc: HwpxDocument) -> str:
+    """파란색 + 밑줄 인 링크용 charPr id 반환."""
+    header = doc.headers[0]
+    link_color = "#0066CC"
+
+    def predicate(el) -> bool:
+        if el.get("textColor") != link_color:
+            return False
+        ul = el.find(f"{_HH}underline")
+        return ul is not None and (ul.get("type") or "").upper() == "SOLID"
+
+    def modifier(el) -> None:
+        el.set("textColor", link_color)
+        for ul in list(el.findall(f"{_HH}underline")):
+            el.remove(ul)
+        _LXML_ET.SubElement(
+            el,
+            f"{_HH}underline",
+            {"type": "SOLID", "shape": "SOLID", "color": link_color},
+        )
+
+    new_el = header.ensure_char_property(
+        predicate=predicate,
+        modifier=modifier,
+        base_char_pr_id="0",
+    )
+    return new_el.get("id")
+
+
+def _ensure_code_charpr(doc: HwpxDocument, *, mono_font_id_latin: int | None) -> str:
+    """모노스페이스 + 연한 음영인 코드용 charPr id 반환."""
+    header = doc.headers[0]
+    shade = "#F2F2F2"
+
+    def predicate(el) -> bool:
+        if el.get("shadeColor") != shade:
+            return False
+        fr = el.find(f"{_HH}fontRef")
+        if fr is None or mono_font_id_latin is None:
+            return mono_font_id_latin is None
+        return fr.get("latin") == str(mono_font_id_latin)
+
+    def modifier(el) -> None:
+        el.set("shadeColor", shade)
+        if mono_font_id_latin is not None:
+            fr = el.find(f"{_HH}fontRef")
+            if fr is not None:
+                fr.set("latin", str(mono_font_id_latin))
+
+    new_el = header.ensure_char_property(
+        predicate=predicate,
+        modifier=modifier,
+        base_char_pr_id="0",
+    )
+    return new_el.get("id")
+
+
+# --------------------------------------------------------------------------- #
 # 리스트 마커                                                                 #
 # --------------------------------------------------------------------------- #
 
@@ -176,9 +260,15 @@ class MarkdownHwpxRenderer:
         self.cp_italic = _ensure_char_style(doc, italic=True)
         self.cp_bold_italic = _ensure_char_style(doc, bold=True, italic=True)
         self.cp_underline = _ensure_char_style(doc, underline=True)
+        # T3 — 링크 / 코드
+        self.cp_link = _ensure_link_charpr(doc)
+        mono_latin = _add_font(doc, "Consolas", "LATIN")
+        self.cp_code = _ensure_code_charpr(doc, mono_font_id_latin=mono_latin)
         # 리스트 상태: 스택 기반 중첩 추적
         # 각 항목: ("bullet", depth) / ("ordered", depth, next_number) / ("blockquote", depth)
         self.list_stack: list = []
+        # 이미지 처리 추적 (참고용)
+        self.images_embedded: list[dict] = []
 
     # ---- 공개 진입점 ---- #
 
@@ -210,6 +300,8 @@ class MarkdownHwpxRenderer:
         """markdown-it inline 토큰의 children 을 순회하며 run 을 추가."""
         bold = False
         italic = False
+        in_link = False
+        link_href: str | None = None
         for tok in children:
             t = tok.type
             if t == "strong_open":
@@ -220,41 +312,85 @@ class MarkdownHwpxRenderer:
                 italic = True
             elif t == "em_close":
                 italic = False
+            elif t == "link_open":
+                in_link = True
+                link_href = tok.attrGet("href")
+            elif t == "link_close":
+                # URL 도 괄호로 덧붙여 인쇄 매체에서도 찾아갈 수 있게 한다.
+                if link_href:
+                    para.add_run(
+                        f" ({link_href})",
+                        char_pr_id_ref=self.cp_regular,
+                    )
+                in_link = False
+                link_href = None
             elif t == "text":
                 if tok.content:
-                    para.add_run(
-                        tok.content,
-                        char_pr_id_ref=self._run_style_id(bold=bold, italic=italic),
-                    )
+                    if in_link:
+                        # 링크 본문은 파란색 + 밑줄
+                        para.add_run(tok.content, char_pr_id_ref=self.cp_link)
+                    else:
+                        para.add_run(
+                            tok.content,
+                            char_pr_id_ref=self._run_style_id(
+                                bold=bold, italic=italic
+                            ),
+                        )
             elif t == "code_inline":
-                # T2: 백틱 + 굵게로 시각적 구분 (T3 에서 monospace + 음영)
+                # T3: 백틱 래핑 + 모노스페이스 + 음영
                 para.add_run(
                     f"`{tok.content}`",
-                    char_pr_id_ref=self.cp_bold,
+                    char_pr_id_ref=self.cp_code,
                 )
             elif t == "softbreak":
-                # 소프트 줄바꿈 → 단락 내부에서는 공백으로 취급
                 para.add_run(" ", char_pr_id_ref=self.cp_regular)
             elif t == "hardbreak":
-                # 하드 줄바꿈 — 본래 새 단락이 맞지만 인라인 컨텍스트에서
-                # 단순화를 위해 공백으로 대체
                 para.add_run("  ", char_pr_id_ref=self.cp_regular)
-            elif t == "link_open":
-                # T3 에서 하이퍼링크. T2 에서는 밑줄 런으로만 표시.
-                bold_before, italic_before = bold, italic
-                # 밑줄 on 상태로 표시하기 위해 별도 id 를 쓰지만 본 구현에서는
-                # text 토큰이 올 때 계속 기본 스타일만 참조한다. 간단화를 위해
-                # 일단 flag 변화만 예약.
-                tok._saved = (bold_before, italic_before)
-            elif t == "link_close":
+            elif t == "image":
+                # T3: 이미지는 BinData 에 등록하고 본문에는 플레이스홀더로
+                src = tok.attrGet("src") or ""
+                alt = tok.content or tok.attrGet("alt") or ""
+                info = self._try_embed_image(src, alt)
+                placeholder = info["placeholder"] if info else f"[🖼 {alt} ({src})]"
+                para.add_run(placeholder, char_pr_id_ref=self.cp_italic)
+            elif t == "s_open" or t == "s_close":
+                # 취소선은 T3 에서도 미지원 (XML 저수준 필요). 통과.
                 pass
-            # 그 외(softbreak, image, s_open 등) — T3 에서 처리
             else:
                 if hasattr(tok, "content") and tok.content:
                     para.add_run(
                         tok.content,
-                        char_pr_id_ref=self._run_style_id(bold=bold, italic=italic),
+                        char_pr_id_ref=self._run_style_id(
+                            bold=bold, italic=italic
+                        ),
                     )
+
+    def _try_embed_image(self, src: str, alt: str) -> dict | None:
+        """이미지 파일이 로컬에 있으면 BinData 에 등록. 성공 시 플레이스홀더
+        텍스트를 포함한 dict 반환. 실패하면 None."""
+        if not src:
+            return None
+        src_path = Path(src)
+        if not src_path.is_absolute():
+            src_path = Path.cwd() / src
+        if not src_path.exists() or not src_path.is_file():
+            return None
+        ext = src_path.suffix.lstrip(".").lower()
+        if ext not in {"png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "svg"}:
+            return None
+        try:
+            data = src_path.read_bytes()
+            item_id = self.doc.add_image(data, ext)
+        except Exception:
+            return None
+        info = {
+            "src": str(src_path),
+            "item_id": item_id,
+            "alt": alt,
+            "placeholder": f"[🖼 {alt or src_path.name} • BinData/{item_id}.{ext}]",
+        }
+        self.images_embedded.append(info)
+        return info
 
     def _current_list_prefix(self) -> str:
         """현재 리스트 스택 상태에서 사용할 들여쓰기 + 마커 문자열."""
@@ -350,9 +486,20 @@ class MarkdownHwpxRenderer:
                 inline = tokens[i + 1]
                 para = self._new_paragraph(style_id=self.body_style)
                 prefix = self._current_list_prefix()
+                # T3: 리스트 아이템의 첫 텍스트가 GFM 태스크 마커면 ☐/☑ 로 치환
+                children = list(inline.children or [])
+                if prefix and children and children[0].type == "text":
+                    first = children[0]
+                    content = first.content or ""
+                    if content.startswith("[ ] "):
+                        prefix = prefix + "☐ "
+                        children[0].content = content[4:]
+                    elif content.lower().startswith("[x] "):
+                        prefix = prefix + "☑ "
+                        children[0].content = content[4:]
                 if prefix:
                     para.add_run(prefix, char_pr_id_ref=self.cp_regular)
-                self._emit_inline_runs(para, inline.children or [])
+                self._emit_inline_runs(para, children)
                 i += 3
                 continue
 
@@ -387,10 +534,14 @@ class MarkdownHwpxRenderer:
             if t == "fence" or t == "code_block":
                 lang = (tok.info or "").strip()
                 para = self._new_paragraph(style_id=self.body_style)
-                para.add_run(f"```{lang}" if lang else "```", char_pr_id_ref=self.cp_bold)
+                para.add_run(
+                    f"```{lang}" if lang else "```",
+                    char_pr_id_ref=self.cp_bold,
+                )
                 for line in tok.content.splitlines() or [""]:
                     p = self._new_paragraph(style_id=self.body_style)
-                    p.add_run(line, char_pr_id_ref=self.cp_regular)
+                    # T3: 본문 라인은 모노스페이스 + 음영
+                    p.add_run(line, char_pr_id_ref=self.cp_code)
                 para_end = self._new_paragraph(style_id=self.body_style)
                 para_end.add_run("```", char_pr_id_ref=self.cp_bold)
                 i += 1
