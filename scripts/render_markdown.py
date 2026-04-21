@@ -237,6 +237,68 @@ HEADING_HEIGHTS = {
     6: 1100,  # 11pt
 }
 
+# 제목 레벨별 paragraph 위/아래 여백 (before/after, 1/100 pt).
+# 본문과의 시각적 구분을 위해 before 를 크게 잡는다.
+HEADING_SPACING = {
+    1: (2400, 600),   # 24pt / 6pt
+    2: (1800, 400),   # 18pt / 4pt
+    3: (1400, 400),   # 14pt / 4pt
+    4: (1200, 400),   # 12pt / 4pt
+    5: (1000, 400),
+    6: (1000, 400),
+}
+
+
+_HP_NS = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+
+
+def _ensure_heading_paragraph_spacing(doc: HwpxDocument) -> None:
+    """개요 1~6 스타일이 참조하는 paraPr 에 before/after 여백을 주입한다.
+
+    기본 템플릿의 개요 1~6 paraPr 에는 `<hp:spacing>` 가 없어 헤딩 앞뒤에
+    공간이 생기지 않는다. 각 스타일이 가리키는 paraPr 를 찾아 spacing 자식
+    요소를 추가/갱신한다.
+    """
+    header = doc.headers[0]
+    # 스타일 name → paraPrIDRef 매핑
+    style_to_pp: dict[str, str] = {}
+    for s in header.element.iter(f"{_HH}style"):
+        name = s.get("name") or ""
+        if name in HEADING_STYLE_NAMES.values():
+            style_to_pp[name] = s.get("paraPrIDRef")
+
+    modified = False
+    for lvl, name in HEADING_STYLE_NAMES.items():
+        pp_id = style_to_pp.get(name)
+        if pp_id is None:
+            continue
+        before, after = HEADING_SPACING.get(lvl, (1000, 400))
+        for pp in header.element.iter(f"{_HH}paraPr"):
+            if pp.get("id") != pp_id:
+                continue
+            spacing = pp.find(f"{_HP_NS}spacing")
+            if spacing is None:
+                spacing = _LXML_ET.SubElement(pp, f"{_HP_NS}spacing")
+            spacing.set("before", str(before))
+            spacing.set("after", str(after))
+            modified = True
+            break
+
+    if modified:
+        header.mark_dirty()
+
+
+def _style_para_pr_id(doc: HwpxDocument, style_id: str | None) -> str | None:
+    """스타일 id 의 paraPrIDRef 반환. 없으면 None."""
+    if style_id is None:
+        return None
+    header = doc.headers[0]
+    for s in header.element.iter(f"{_HH}style"):
+        if s.get("id") == str(style_id):
+            pp = s.get("paraPrIDRef")
+            return pp if pp else None
+    return None
+
 
 def _ensure_heading_charpr(doc: HwpxDocument, level: int) -> str:
     """레벨별 헤딩 run 용 charPr (큰 글자 + 굵게) id 반환.
@@ -312,6 +374,13 @@ class MarkdownHwpxRenderer:
         self.heading_cp = {
             lvl: _ensure_heading_charpr(doc, lvl) for lvl in range(1, 7)
         }
+        # T4+ — 개요 1~6 paraPr 에 위/아래 여백 주입 (기본 템플릿에는 없음)
+        _ensure_heading_paragraph_spacing(doc)
+        # 각 헤딩 레벨의 paraPrIDRef (paragraph 에 명시적으로 붙여 spacing 적용)
+        self.heading_pp = {
+            lvl: _style_para_pr_id(doc, self.heading_styles.get(lvl))
+            for lvl in range(1, 7)
+        }
         # 리스트 상태: 스택 기반 중첩 추적
         # 각 항목: ("bullet", depth) / ("ordered", depth, next_number) / ("blockquote", depth)
         self.list_stack: list = []
@@ -338,10 +407,14 @@ class MarkdownHwpxRenderer:
 
     # ---- 단락 / 인라인 ---- #
 
-    def _new_paragraph(self, *, style_id: str | None = None):
+    def _new_paragraph(
+        self, *, style_id: str | None = None, para_pr_id: str | None = None
+    ):
         kwargs = {"include_run": False}
         if style_id is not None:
             kwargs["style_id_ref"] = style_id
+        if para_pr_id is not None:
+            kwargs["para_pr_id_ref"] = para_pr_id
         return self.doc.add_paragraph("", **kwargs)
 
     def _emit_inline_flat(self, para, children: Iterable, cp_id: str) -> None:
@@ -544,7 +617,8 @@ class MarkdownHwpxRenderer:
                 inline = tokens[i + 1]
                 style = self.heading_styles.get(level) or self.body_style
                 cp = self.heading_cp.get(level) or self.cp_regular
-                para = self._new_paragraph(style_id=style)
+                pp = self.heading_pp.get(level)
+                para = self._new_paragraph(style_id=style, para_pr_id=pp)
                 # 헤딩 내 인라인 서식(굵게·기울임·링크·코드) 은 평탄화한다.
                 # 헤딩 텍스트 전체가 큰 글자 + 굵게이기 때문에 강조가 의미가 없고,
                 # 추가 charPr 파생을 억제해 파일 크기도 줄인다.
