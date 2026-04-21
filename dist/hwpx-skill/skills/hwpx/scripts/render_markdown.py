@@ -304,18 +304,19 @@ def _apply_default_fonts(doc: HwpxDocument) -> None:
     """
     hangul_id = _add_font(doc, DEFAULT_HANGUL_FONT, "HANGUL")
     latin_id = _add_font(doc, DEFAULT_LATIN_FONT, "LATIN")
-    # 모든 charPr 의 fontRef 가 새 폰트를 가리키도록 id=0 을 덮어쓴다.
+    # 모든 charPr 의 fontRef.hangul / fontRef.latin 을 새 폰트 id 로 교체.
+    # 이후 _ensure_code_charpr 가 Consolas 를 쓰는 전용 charPr 을 만들 때는
+    # 그 modifier 가 latin 을 Consolas id 로 덮어쓴다(순서 보장: render_file
+    # 에서 _apply_default_fonts → MarkdownHwpxRenderer 순).
     header = doc.headers[0]
     if hangul_id is not None or latin_id is not None:
         for cp in header.element.iter(f"{_HH}charPr"):
             fr = cp.find(f"{_HH}fontRef")
             if fr is None:
                 continue
-            # 본문(기본)용 fontRef 만 바꿈 — 이미 다른 id 를 참조(예: Consolas)
-            # 하는 곳은 건드리지 않는다.
-            if fr.get("hangul") == "0" and hangul_id is not None:
+            if hangul_id is not None:
                 fr.set("hangul", str(hangul_id))
-            if fr.get("latin") == "0" and latin_id is not None:
+            if latin_id is not None:
                 fr.set("latin", str(latin_id))
         header.mark_dirty()
 
