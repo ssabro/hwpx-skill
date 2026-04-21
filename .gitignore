@@ -1,4 +1,5 @@
 %programdata%/
 __pycache__/
 *.pyc
-dist/
+dist/*.plugin
+dist/*.zip

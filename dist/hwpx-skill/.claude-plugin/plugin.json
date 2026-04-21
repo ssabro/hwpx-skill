@@ -1,0 +1,21 @@
+{
+  "name": "hwpx-skill",
+  "version": "0.1.0",
+  "description": "Claude skill for creating and editing Korean HWPX (Hangul) documents. Includes hwpx_toolkit editing core, hwpx_ns_repair namespace normalization CLI, and build_report_skeleton template generator. Optimized for Korean report and official-letter (gian-mun) workflows.",
+  "author": {
+    "name": "ssabro"
+  },
+  "homepage": "https://github.com/ssabro/hwpx-skill",
+  "repository": "https://github.com/ssabro/hwpx-skill",
+  "license": "MIT",
+  "keywords": [
+    "hwpx",
+    "hwp",
+    "hangul",
+    "korean",
+    "document",
+    "owpml",
+    "report",
+    "official-letter"
+  ]
+}
