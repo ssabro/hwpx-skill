@@ -3,15 +3,19 @@
   "owner": {
     "name": "ssabro"
   },
+  "homepage": "https://github.com/ssabro/hwpx-skill",
+  "repository": "https://github.com/ssabro/hwpx-skill",
   "plugins": [
     {
       "name": "hwpx-skill",
       "source": "./dist/hwpx-skill",
-      "description": "한글(HWPX) 문서를 Claude에서 생성·편집·스켈레톤 치환하는 스킬. hwpx_toolkit 편집 코어, hwpx_ns_repair 네임스페이스 정규화 CLI, build_report_skeleton 스켈레톤 생성기를 포함한다.",
+      "description": "Claude skill for creating and editing Korean HWPX (Hangul) documents. Includes hwpx_toolkit editing core, hwpx_ns_repair namespace normalization CLI, and build_report_skeleton template generator.",
       "version": "0.1.0",
       "author": {
         "name": "ssabro"
       },
+      "homepage": "https://github.com/ssabro/hwpx-skill",
+      "repository": "https://github.com/ssabro/hwpx-skill",
       "license": "MIT",
       "keywords": [
         "hwpx",
